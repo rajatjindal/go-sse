@@ -3,41 +3,54 @@ package net
 import (
 	"bufio"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
 	"net/http"
 	neturl "net/url"
 	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
-type Subscription struct {
+type Subscription interface {
+	ErrFeed() <-chan error
+	Feed() <-chan Event
+	EventType() string
+	Close()
+}
+
+type subscription struct {
 	id      string
-	parent  *SSEFeed
+	parent  *sseFeed
 	feed    chan Event
 	errFeed chan error
 
 	eventType string
 }
 
-func (s *Subscription) ErrFeed() <-chan error {
+func (s *subscription) ErrFeed() <-chan error {
 	return s.errFeed
 }
 
-func (s *Subscription) Feed() <-chan Event {
+func (s *subscription) Feed() <-chan Event {
 	return s.feed
 }
 
-func (s *Subscription) EventType() string {
+func (s *subscription) EventType() string {
 	return s.eventType
 }
 
-func (s *Subscription) Close() {
+func (s *subscription) Close() {
 	s.parent.closeSubscription(s.id)
 }
 
-type SSEFeed struct {
-	subscriptions    map[string]*Subscription
+type SSEFeed interface {
+	Subscribe(eventType string) (Subscription, error)
+	Close()
+}
+
+type sseFeed struct {
+	subscriptions    map[string]*subscription
 	subscriptionsMtx sync.Mutex
 
 	stopChan        chan interface{}
@@ -45,7 +58,7 @@ type SSEFeed struct {
 	unfinishedEvent *StringEvent
 }
 
-func ConnectWithSSEFeed(url string, headers map[string][]string) (*SSEFeed, error) {
+func ConnectWithSSEFeed(url string, headers map[string][]string) (SSEFeed, error) {
 	parsedURL, err := neturl.Parse(url)
 	if err != nil {
 		return nil, err
@@ -65,12 +78,12 @@ func ConnectWithSSEFeed(url string, headers map[string][]string) (*SSEFeed, erro
 
 	reader := bufio.NewReader(resp.Body)
 
-	feed := &SSEFeed{
-		subscriptions: make(map[string]*Subscription),
+	feed := &sseFeed{
+		subscriptions: make(map[string]*subscription),
 		stopChan:      make(chan interface{}),
 	}
 
-	go func(response *http.Response, feed *SSEFeed) {
+	go func(response *http.Response, feed *sseFeed) {
 		defer response.Body.Close()
 	loop:
 		for {
@@ -95,7 +108,7 @@ func ConnectWithSSEFeed(url string, headers map[string][]string) (*SSEFeed, erro
 	return feed, nil
 }
 
-func (s *SSEFeed) Close() {
+func (s *sseFeed) Close() {
 	close(s.stopChan)
 	for subId, _ := range s.subscriptions {
 		s.closeSubscription(subId)
@@ -103,12 +116,12 @@ func (s *SSEFeed) Close() {
 	s.closed = true
 }
 
-func (s *SSEFeed) Subscribe(eventType string) (*Subscription, error) {
+func (s *sseFeed) Subscribe(eventType string) (Subscription, error) {
 	if s.closed {
 		return nil, fmt.Errorf("sse feed closed")
 	}
 
-	sub := &Subscription{
+	sub := &subscription{
 		id:        uuid.New().String(),
 		parent:    s,
 		eventType: eventType,
@@ -124,7 +137,7 @@ func (s *SSEFeed) Subscribe(eventType string) (*Subscription, error) {
 	return sub, nil
 }
 
-func (s *SSEFeed) closeSubscription(id string) bool {
+func (s *sseFeed) closeSubscription(id string) bool {
 	s.subscriptionsMtx.Lock()
 	defer s.subscriptionsMtx.Unlock()
 
@@ -135,7 +148,7 @@ func (s *SSEFeed) closeSubscription(id string) bool {
 	return false
 }
 
-func (s *SSEFeed) processRaw(b []byte) {
+func (s *sseFeed) processRaw(b []byte) {
 	if len(b) == 1 && b[0] == '\n' {
 		s.subscriptionsMtx.Lock()
 		defer s.subscriptionsMtx.Unlock()
@@ -179,7 +192,7 @@ func (s *SSEFeed) processRaw(b []byte) {
 	}
 }
 
-func (s *SSEFeed) error(err error) {
+func (s *sseFeed) error(err error) {
 	s.subscriptionsMtx.Lock()
 	defer s.subscriptionsMtx.Unlock()
 
